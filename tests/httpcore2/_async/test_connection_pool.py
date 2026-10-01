@@ -10,6 +10,32 @@ import httpcore2
 
 
 @pytest.mark.anyio
+async def test_connection_pool_response_close_failure() -> None:
+    async def trace(name: str, info: dict[str, typing.Any]) -> None:
+        if name == "http11.response_closed.started":
+            raise RuntimeError("Response cleanup failed")
+
+    backend = httpcore2.AsyncMockBackend([b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"])
+    async with httpcore2.AsyncConnectionPool(max_connections=1, network_backend=backend) as pool:
+        response = await pool.handle_async_request(
+            httpcore2.Request(
+                "GET", "http://example.com/", headers={"Host": "example.com"}, extensions={"trace": trace}
+            )
+        )
+        connection = pool.connections[0]
+        with pytest.raises(RuntimeError, match="Response cleanup failed"):
+            await response.aclose()
+
+        assert connection.is_closed()
+        assert not pool.connections
+        assert not pool._requests
+        await response.aclose()
+
+        follow_up = await pool.request("GET", "http://example.com/", extensions={"timeout": {"pool": 0.1}})
+        assert follow_up.content == b"{}"
+
+
+@pytest.mark.anyio
 async def test_connection_pool_with_keepalive() -> None:
     """
     By default HTTP/1.1 requests should be returned to the connection pool.
